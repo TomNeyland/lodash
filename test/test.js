@@ -189,6 +189,15 @@
     var xml = new ActiveXObject('Microsoft.XMLDOM');
   } catch(e) {}
 
+  /** Poison the free variable `root` in Node.js */
+  try {
+    Object.defineProperty(global.root, 'root', {
+      'configurable': true,
+      'enumerable': false,
+      'get': function() { throw new ReferenceError; }
+    });
+  } catch(e) {}
+
   /** Use a single "load" function. */
   var load = (!amd && typeof require == 'function')
     ? require
@@ -624,9 +633,10 @@
   // Expose internal modules for better code coverage.
   _.attempt(function() {
     if (isModularize && !(amd || isNpm)) {
-      _.each(['baseEach', 'isIndex', 'isIterateeCall', 'isLength'], function(funcName) {
-        var path = require('path'),
-            func = require(path.join(path.dirname(filePath), 'internal', funcName + '.js'));
+      _.each(['internal/baseEach', 'internal/isIndex', 'internal/isIterateeCall',
+              'internal/isLength', 'function/flow', 'function/flowRight'], function(id) {
+        var func = require(id),
+            funcName = _.last(id.split('/'));
 
         _['_' + funcName] = func[funcName] || func['default'] || func;
       });
@@ -819,15 +829,16 @@
       }
     });
 
-    test('should return `false` for non-indexes', 4, function() {
+    test('should return `false` for non-indexes', 5, function() {
       if (func) {
+        strictEqual(func('1abc'), false);
         strictEqual(func(-1), false);
         strictEqual(func(3, 3), false);
         strictEqual(func(1.1), false);
         strictEqual(func(MAX_SAFE_INTEGER), false);
       }
       else {
-        skipTest(4);
+        skipTest(5);
       }
     });
   }());
@@ -2312,31 +2323,39 @@
       notStrictEqual(combined, _.identity);
     });
 
-    test('`_.' + methodName + '` should support shortcut fusion', 3, function() {
-      var filterCount = 0,
-          mapCount = 0;
+    test('`_.' + methodName + '` should support shortcut fusion', 6, function() {
+      var filterCount,
+          mapCount;
 
-      var map = _.curry(_.rearg(_.ary(_.map, 2), 1, 0), 2),
-          filter = _.curry(_.rearg(_.ary(_.filter, 2), 1, 0), 2),
+      var filter = _.curry(_.rearg(_.ary(_.filter, 2), 1, 0), 2),
+          map = _.curry(_.rearg(_.ary(_.map, 2), 1, 0), 2),
           take = _.curry(_.rearg(_.ary(_.take, 2), 1, 0), 2);
 
-      var partialMap = map(function(value) { mapCount++; return value * value; }),
-          partialFilter = filter(function(value) { filterCount++; return value % 2 == 0; }),
-          partialTake = take(2);
+      var filter2 = filter(function(value) { filterCount++; return value % 2 == 0; }),
+          map2 = map(function(value) { mapCount++; return value * value; }),
+          take2 = take(2);
 
-      var combined = isFlow
-        ? func(partialMap, partialFilter, _.compact, partialTake)
-        : func(partialTake, _.compact, partialFilter, partialMap);
+      _.times(2, function(index) {
+        var fn = index ? _['_' + methodName] : func;
+        if (!fn) {
+          skipTest(3);
+          return;
+        }
+        var combined = isFlow
+          ? fn(map2, filter2, _.compact, take2)
+          : fn(take2, _.compact, filter2, map2);
 
-      deepEqual(combined(_.range(100)), [4, 16]);
+        filterCount = mapCount = 0;
+        deepEqual(combined(_.range(100)), [4, 16]);
 
-      if (!isNpm && WeakMap && _.support.funcNames) {
-        strictEqual(filterCount, 5, 'filterCount');
-        strictEqual(mapCount, 5, 'mapCount');
-      }
-      else {
-        skipTest(2);
-      }
+        if (!isNpm && WeakMap && WeakMap.name) {
+          strictEqual(filterCount, 5, 'filterCount');
+          strictEqual(mapCount, 5, 'mapCount');
+        }
+        else {
+          skipTest(2);
+        }
+      });
     });
 
     test('`_.' + methodName + '` should work with curried functions with placeholders', 1, function() {
@@ -6983,7 +7002,7 @@
       deepEqual(actual, [['a', 'b', 'c']]);
     });
 
-    test('should work with a function `methodName` argument', 1, function() {
+    test('should work with a function for `methodName`', 1, function() {
       var array = ['a', 'b', 'c'];
 
       var actual = _.invoke(array, function(left, right) {
@@ -8294,7 +8313,7 @@
       deepEqual(actual, expected);
     });
 
-    test('should compare a variety of `source` values', 2, function() {
+    test('should compare a variety of `source` property values', 2, function() {
       var object1 = { 'a': false, 'b': true, 'c': '3', 'd': 4, 'e': [5], 'f': { 'g': 6 } },
           object2 = { 'a': 0, 'b': 1, 'c': 3, 'd': '4', 'e': ['5'], 'f': { 'g': '6' } };
 
@@ -8316,6 +8335,15 @@
       });
 
       deepEqual(actual, [false, true]);
+    });
+
+    test('should work with strings', 4, function() {
+      var pairs = [['xo', Object('x')], [Object('xo'), 'x']];
+
+      _.each(pairs, function(pair) {
+        strictEqual(_.isMatch(pair[0], pair[1]), true);
+        strictEqual(_.isMatch(pair[1], pair[0]), false);
+      });
     });
 
     test('should return `true` when comparing a `source` of empty arrays and objects', 1, function() {
@@ -8412,20 +8440,6 @@
           matches = _.matches({ 'a': { 'b': 1 } });
 
       strictEqual(matches(object), true);
-    });
-
-    test('should work with a function for `source`', 1, function() {
-      function source() {}
-
-      source.a = 1;
-      source.b = function() {};
-      source.c = 3;
-
-      var matches = _.matches(source),
-          objects = [{ 'a': 1 }, { 'a': 1, 'b': source.b, 'c': 3 }],
-          actual = _.map(objects, matches);
-
-      deepEqual(actual, [false, true]);
     });
 
     test('should match problem JScript properties (test in IE < 9)', 1, function() {
@@ -9889,7 +9903,7 @@
       deepEqual(actual, expected);
     });
 
-    test('should compare a variety of `source` values', 2, function() {
+    test('should compare a variety of `source` property values', 2, function() {
       var object1 = { 'a': false, 'b': true, 'c': '3', 'd': 4, 'e': [5], 'f': { 'g': 6 } },
           object2 = { 'a': 0, 'b': 1, 'c': 3, 'd': '4', 'e': ['5'], 'f': { 'g': '6' } },
           matches = _.matches(object1);
@@ -10035,6 +10049,18 @@
           actual = _.map(objects, matches);
 
       deepEqual(actual, [false, true]);
+    });
+
+    test('should work with strings', 4, function() {
+      var pairs = [['xo', Object('x')], [Object('xo'), 'x']];
+
+      _.each(pairs, function(pair) {
+        var matches = _.matches(pair[1]);
+        strictEqual(matches(pair[0]), true);
+
+        matches = _.matches(pair[0]);
+        strictEqual(matches(pair[1]), false);
+      });
     });
 
     test('should match problem JScript properties (test in IE < 9)', 1, function() {
@@ -10317,6 +10343,18 @@
           actual = _.map(objects, matches);
 
       deepEqual(actual, [false, true]);
+    });
+
+    test('should work with strings', 4, function() {
+      var pairs = [['xo', Object('x')], [Object('xo'), 'x']];
+
+      _.each(pairs, function(pair) {
+        var matches = _.matchesProperty('0', pair[1]);
+        strictEqual(matches(pair[0]), true);
+
+        matches = _.matchesProperty('0', pair[0]);
+        strictEqual(matches(pair[1]), false);
+      });
     });
 
     test('should match properties when `value` is not a plain object', 1, function() {
@@ -10653,6 +10691,23 @@
       deepEqual(actual, expected);
     });
 
+    test('should skip `undefined` values in arrays if a destination value exists', 2, function() {
+      var array = Array(3);
+      array[0] = 1;
+      array[2] = 3;
+
+      var actual = _.merge([4, 5, 6], array),
+          expected = [1, 5, 3];
+
+      deepEqual(actual, expected);
+
+      array = [1, , 3];
+      array[1] = undefined;
+
+      actual = _.merge([4, 5, 6], array);
+      deepEqual(actual, expected);
+    });
+
     test('should merge `arguments` objects', 3, function() {
       var object1 = { 'value': args },
           object2 = { 'value': { '3': 4 } },
@@ -10768,7 +10823,7 @@
       deepEqual(actual, { 'a': [] });
     });
 
-    test('should work with a function `object` value', 2, function() {
+    test('should work with a function for `object`', 2, function() {
       function Foo() {}
 
       var source = { 'a': 1 },
@@ -11784,6 +11839,12 @@
     test('should work with an object that has a `length` property', 1, function() {
       var object = { '0': 'a', '1': 'b', 'length': 2 };
       deepEqual(_.pairs(object), [['0', 'a'], ['1', 'b'], ['length', 2]]);
+    });
+
+    test('should work with strings', 2, function() {
+      _.each(['xo', Object('xo')], function(string) {
+        deepEqual(_.pairs(string), [['0', 'x'], ['1', 'o']]);
+      });
     });
   }());
 
@@ -13609,6 +13670,14 @@
       });
     });
 
+    test('`_.' + methodName + '` should be able to return `null` values', 2, function() {
+      var object = { 'a': { 'b': null } };
+
+      _.each(['a.b', ['a', 'b']], function(path) {
+        strictEqual(func(object, path), null);
+      });
+    });
+
     test('`_.' + methodName + '` should follow `path` over non-plain objects', 4, function() {
       var object = { 'a': '' },
           paths = ['constructor.prototype.a', ['constructor', 'prototype', 'a']];
@@ -14121,6 +14190,13 @@
       });
 
       delete numberProto.a;
+    });
+
+    test('should not create an array for missing non-index property names that start with numbers', 1, function() {
+      var object = {};
+
+      _.set(object, ['1a', '2b', '3c'], 1);
+      deepEqual(object, { '1a': { '2b': { '3c': 1 } } });
     });
   }());
 
